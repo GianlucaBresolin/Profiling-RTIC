@@ -1,0 +1,35 @@
+[package]
+name = "Profiling-RTIC"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+deafult = []
+
+semihosting = ["defmt-semihosting"]
+rtt = ["defmt-rtt"]
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = [
+  "inline-asm",
+  "critical-section-single-core",
+] }
+cortex-m-rt = "0.7.5"
+cortex-m-semihosting = "0.5.0"
+defmt = "1.0.1"
+defmt-semihosting = { version = "0.3.0", optional = true }
+defmt-rtt = { version = "1.0.0", optional = true }
+libm = "0.2.15"
+rtic = { version = "2.2.0", features = ["cortex-m", "thumbv7-backend"] }
+rtic-monotonics = { version = "2.1.0", features = [
+  "cortex-m-systick",
+  "stm32f405rg",
+  "stm32_tim2",
+  "defmt",
+] }
+rtic-sync = { version = "1.4.0", features = ["defmt-03"] }
+stm32f4xx-hal = { git = "https://github.com/tommasoprandin/stm32f4xx-hal", branch = "support/qemu-olimexh405", features = [
+  "qemu-olimexh405",
+  "defmt",
+] }
+critical-section = "1.2.0"

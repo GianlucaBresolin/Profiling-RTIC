@@ -1,0 +1,35 @@
+[env]
+DEFMT_LOG = "info"
+CARGO_TARGET_MODE = "qemu"
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+linker = "flip-link"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+    # cortex-m-rt linker script (will automatically pull in the memory.x file)
+    "-C",
+    "link-arg=-Tlink.x",
+    "-C",
+    "link-arg=--nmagic",
+
+    # add defmt link script
+    "-C",
+    "link-arg=-Tdefmt.x",
+]
+runner = ["sh", "-c", """
+    if [ "$CARGO_TARGET_MODE" = "qemu" ]; then
+    qemu-system-arm \
+        -cpu cortex-m4 \
+        -machine olimex-stm32-h405 \
+        -nographic \
+        -semihosting-config enable=on,target=native \
+        -kernel $1 | \
+        defmt-print -e $1 --log-format '[{t:>10} {L:5}] {s}'
+    else
+        probe-rs run --protocol swd --chip stm32f405rgtx $1
+    fi
+    """, "--"]
