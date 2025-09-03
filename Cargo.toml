@@ -9,6 +9,9 @@ deafult = []
 semihosting = ["defmt-semihosting"]
 rtt = ["defmt-rtt"]
 
+isr-switch = []
+delay-until = []
+
 [dependencies]
 cortex-m = { version = "0.7.7", features = [
   "inline-asm",
