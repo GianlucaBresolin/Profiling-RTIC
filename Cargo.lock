@@ -14,6 +14,7 @@ dependencies = [
  "defmt-rtt",
  "defmt-semihosting",
  "libm",
+ "profiled-rtic-monotonics",
  "rtic",
  "rtic-monotonics",
  "rtic-sync",
@@ -561,6 +562,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "profiled-rtic-monotonics"
+version = "2.1.0"
+dependencies = [
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-semihosting",
+ "defmt 1.0.1",
+ "defmt-semihosting",
+ "fugit",
+ "portable-atomic",
+ "rtic-time",
 ]
 
 [[package]]

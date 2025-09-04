@@ -69,12 +69,12 @@ mod app {
         rise_interrupt_dwt: Option<&'static DWT>,
         next_time: Option<Instant>,
         
-        dwt_isr: Option<&'static DWT>,
+        isr_dwt: Option<&'static DWT>,
         isr_switch_activation_count: u32,
         switch_cycles: u32,
         time_ns: f32,
         wc_isr_switch: f32,
-        hclk_mhz: f32,
+        isr_hclk_mhz: f32,
 
         // Delay_until
         delay_until_activation_count: u32,
@@ -167,12 +167,12 @@ mod app {
                 rise_interrupt_dwt: dwt_ref,
                 next_time: None,
 
-                dwt_isr: dwt_ref,
+                isr_dwt: dwt_ref,
                 isr_switch_activation_count: 0,
                 switch_cycles: 0,
                 time_ns: 0.0, 
                 wc_isr_switch: 0.0,
-                hclk_mhz,
+                isr_hclk_mhz: hclk_mhz,
     
                 // Delay_until
                 delay_until_activation_count: 0,
@@ -201,10 +201,10 @@ mod app {
     }
     
 
-    #[task(binds = EXTI0, local = [dwt_isr, isr_switch_activation_count, switch_cycles, hclk_mhz, time_ns, wc_isr_switch])]
+    #[task(binds = EXTI0, local = [isr_dwt, isr_switch_activation_count, switch_cycles, isr_hclk_mhz, time_ns, wc_isr_switch])]
     fn exti0_isr(cx: exti0_isr::Context) {        
-        *cx.local.switch_cycles = cx.local.dwt_isr.unwrap().cyccnt.read();
-        *cx.local.time_ns = (*cx.local.switch_cycles as f32 / *cx.local.hclk_mhz) * 1000.0;
+        *cx.local.switch_cycles = cx.local.isr_dwt.unwrap().cyccnt.read();
+        *cx.local.time_ns = (*cx.local.switch_cycles as f32 / *cx.local.isr_hclk_mhz) * 1000.0;
         defmt::info!("ISR switch time: {} ns (number of cycles: {})", *cx.local.time_ns as u32, *cx.local.switch_cycles);
         defmt::info!("--------------------------------------------");
 
@@ -233,6 +233,7 @@ mod app {
 
             defmt::info!("--------------------------------------------");
 
+            // Update the wc_delay_until_overhead
             *cx.local.wc_delay_until_overhead = Some(cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).max(cx.local.delay_until_overhead.unwrap()));
 
             *cx.local.delay_until_activation_count += 1;
