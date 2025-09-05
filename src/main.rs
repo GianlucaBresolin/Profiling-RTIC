@@ -40,22 +40,9 @@ mod app {
         time::{Mono, Instant},
         WCET_THRESHOLD,
     };
-    #[cfg(any(
-        feature = "delay-until",
-        feature = "isr-switch",
-        feature = "signal-rtic-sync",
-        feature = "task-semaphore",
-        feature = "event-queue",
-    ))]
     use core::mem::MaybeUninit;
-    #[cfg(feature = "delay-until")]
-    use stm32f4xx_hal::dwt::DwtExt;
     use cortex_m::peripheral::DWT;
     use stm32f4xx_hal::{
-        dwt::{
-            Dwt, 
-            StopWatch,
-        }, 
         interrupt, 
         pac::NVIC, 
         rcc::RccExt,
@@ -63,7 +50,6 @@ mod app {
     use rtic_monotonics::{
         fugit::{
             RateExtU32 as _,
-            ExtU64 as _,
         }, 
         systick::prelude::*};
     use rtic_sync::{
@@ -74,8 +60,6 @@ mod app {
         make_signal,
     };
 
-    type ProfilingDuration = fugit::NanosDurationU64;
-
     // Shared resources go here
     #[shared]
     struct Shared {}
@@ -84,10 +68,10 @@ mod app {
     #[local]
     struct Local {
         // ISR-Switch
-        rise_interrupt_dwt: Option<&'static DWT>,
+        rise_interrupt_dwt: &'static DWT,
         next_time: Option<Instant>,
         
-        isr_dwt: Option<&'static DWT>,
+        isr_dwt: &'static DWT,
         isr_switch_activation_count: u32,
         switch_cycles: u32,
         time_ns: f32,
@@ -95,18 +79,20 @@ mod app {
         isr_hclk_mhz: f32,
 
         // Delay_until
+        delay_until_dwt: &'static DWT,
+        delay_until_hclk_mhz: f32,
         delay_until_activation_count: u32,
         delay_interval: u32, 
-        delay_until_stopwatch: Option<StopWatch<'static>>,
-        delay_until_overhead: Option<ProfilingDuration>, 
-        wc_delay_until_overhead: Option<ProfilingDuration>,
+        delay_until_cycles: u32,
+        delay_until_overhead: f32, 
+        wc_delay_until_overhead: f32,
 
         // Signal rtic_sync
         signal_writer: SignalWriter<'static, ()>,
-        signal_writer_dwt: Option<&'static DWT>,
+        signal_writer_dwt: &'static DWT,
 
         signal_reader: SignalReader<'static, ()>,
-        signal_reader_dwt: Option<&'static DWT>,
+        signal_reader_dwt: &'static DWT,
         signal_reader_cycles: u32,
         signal_reader_time: f32,
         wc_signal_rtic_sync: f32,
@@ -115,7 +101,7 @@ mod app {
 
         // TaskSemaphore
         task_semaphore_waiter: TaskSemaphoreWaiter<'static>,
-        task_semaphore_waiter_dwt: Option<&'static DWT>,
+        task_semaphore_waiter_dwt: &'static DWT,
 
         task_semaphore_waiter_cycles: u32,
         task_semaphore_waiter_hclk_mhz: f32,
@@ -123,11 +109,11 @@ mod app {
         wc_task_semaphore_waiter: f32,
         task_semaphore_waiter_activation_count: u32,
         task_semaphore_signaler: TaskSemaphoreSignaler<'static>,
-        task_semaphore_signaler_dwt: Option<&'static DWT>,
+        task_semaphore_signaler_dwt: &'static DWT,
 
         // EventQueue
         event_queue_waiter: EventQueueWaiter<'static>,
-        event_queue_waiter_dwt: Option<&'static DWT>,
+        event_queue_waiter_dwt: &'static DWT,
 
         event_queue_waiter_cycles: u32,
         event_queue_waiter_hclk_mhz: f32,
@@ -135,21 +121,11 @@ mod app {
         wc_event_queue_waiter: f32,
         event_queue_waiter_activation_count: u32,
         event_queue_signaler: EventQueueSignaler<'static>,
-        event_queue_signaler_dwt: Option<&'static DWT>,
+        event_queue_signaler_dwt: &'static DWT,
     }
 
     #[init(local = [
-        #[cfg(any(
-            feature = "isr-switch",
-            feature = "signal-rtic-sync",
-            feature = "task-semaphore",
-            feature = "event-queue",
-        ))]
         dwt_storage: MaybeUninit<DWT> = MaybeUninit::uninit(),
-        #[cfg(feature = "delay-until")]
-        dwt_hal_storage: MaybeUninit<Dwt> = MaybeUninit::uninit(),
-        #[cfg(feature = "delay-until")]
-        delay_until_times: [u32; 2] = [0; 2],
     ])]
     fn init(cx: init::Context) -> (Shared, Local) {
         defmt::info!("Init");
@@ -176,53 +152,23 @@ mod app {
 
         // DWT setup
         #[allow(unused_assignments, unused_mut)]
-        let mut dwt_ref: Option<&'static DWT> = None;
-        #[cfg(any(
-            feature = "isr-switch",
-            feature = "signal-rtic-sync",
-            feature = "task-semaphore",
-            feature = "event-queue",
-        ))]
-        {
-            dwt_ref = Some( 
-                unsafe { 
-                    core.DCB.enable_trace();
-                    core.DWT.enable_cycle_counter();
-                    cx.local.dwt_storage.write(core.DWT);
-                    cx.local.dwt_storage.assume_init_ref()
-                }
-            );
-        }
-
-        // Dwt HAL setup (provides stopwatch)
-        #[allow(unused_variables)]
-        let hal_dwt: Option<&'static Dwt>;
-        #[cfg(feature = "delay-until")]
-        {
-            hal_dwt = Some(
-                unsafe {
-                    let dwt = core.DWT.constrain(core.DCB, &clocks);
-                    cx.local.dwt_hal_storage.write(dwt);
-                    cx.local.dwt_hal_storage.assume_init_ref()
-                }
-            );  
-        }
+        let mut dwt_ref: &'static DWT = 
+            unsafe { 
+                core.DCB.enable_trace();
+                core.DWT.enable_cycle_counter();
+                cx.local.dwt_storage.write(core.DWT);
+                cx.local.dwt_storage.assume_init_ref()
+            };
 
         // ISR-Switch profiling setup
         #[cfg(feature = "isr-switch")] 
         rise_interrupt::spawn()
             .expect("Error spawning interrupt generator");
 
-        // Delay_until stopwatch and profiling setup
-        #[allow(unused_assignments, unused_mut)]
-        let mut delay_until_stopwatch: Option<StopWatch<'static>> = None;
+        // Delay_until profiling setup
         #[cfg(feature = "delay-until")]
-        {
-            delay_until_stopwatch = Some(hal_dwt.unwrap().stopwatch(cx.local.delay_until_times));
-
-            delay_until_profiling::spawn()
-                .expect("Error spawning delay_until task");
-        }
+        delay_until_profiling::spawn()
+            .expect("Error spawning delay_until task");
 
         // Signal rtic_sync setup
         let (signal_writer, signal_reader) = make_signal!(());
@@ -261,7 +207,6 @@ mod app {
                 .expect("Error spawning event queue waiter task");
         }
 
-
         (
             Shared {},
             Local {
@@ -277,11 +222,13 @@ mod app {
                 isr_hclk_mhz: hclk_mhz,
     
                 // Delay_until
+                delay_until_dwt: dwt_ref,
+                delay_until_hclk_mhz: hclk_mhz,
                 delay_until_activation_count: 0,
-                delay_interval: 10,
-                delay_until_stopwatch, 
-                delay_until_overhead: None,
-                wc_delay_until_overhead: None,
+                delay_interval: 10, 
+                delay_until_cycles: 0,
+                delay_until_overhead: 0.0,
+                wc_delay_until_overhead: 0.0,
 
                 // Signal rtic_sync
                 signal_writer,
@@ -331,7 +278,7 @@ mod app {
             
             critical_section::with(|_cs| {
                 NVIC::pend(interrupt::EXTI0);
-                unsafe{ cx.local.rise_interrupt_dwt.unwrap().cyccnt.write(0) };  
+                unsafe{ cx.local.rise_interrupt_dwt.cyccnt.write(0) };  
             });
 
             Mono::delay_until(cx.local.next_time.unwrap()).await;
@@ -341,7 +288,7 @@ mod app {
 
     #[task(binds = EXTI0, local = [isr_dwt, isr_switch_activation_count, switch_cycles, isr_hclk_mhz, time_ns, wc_isr_switch])]
     fn exti0_isr(cx: exti0_isr::Context) {        
-        *cx.local.switch_cycles = cx.local.isr_dwt.unwrap().cyccnt.read();
+        *cx.local.switch_cycles = cx.local.isr_dwt.cyccnt.read();
         *cx.local.time_ns = (*cx.local.switch_cycles as f32 / *cx.local.isr_hclk_mhz) * 1000.0;
         defmt::info!("ISR switch time: {} ns (number of cycles: {})", *cx.local.time_ns as u32, *cx.local.switch_cycles);
         defmt::info!("--------------------------------------------");
@@ -356,33 +303,28 @@ mod app {
         }
     } 
 
-    #[task(priority = 1, local =[delay_until_activation_count, delay_until_stopwatch, delay_interval, delay_until_overhead, wc_delay_until_overhead])]
+    #[task(priority = 1, local =[delay_until_dwt, delay_until_hclk_mhz, delay_until_activation_count, delay_interval, delay_until_cycles, delay_until_overhead, wc_delay_until_overhead])]
     async fn delay_until_profiling(cx: delay_until_profiling::Context) -> ! {
         loop {
-            if let Some(stopwatch) = cx.local.delay_until_stopwatch.as_mut() {
-                stopwatch.reset();
-                Mono::delay_until(Mono::now() + cx.local.delay_interval.nanos()).await;
-                stopwatch.lap();
+            unsafe { cx.local.delay_until_dwt.cyccnt.write(0) };
+            Mono::delay_until(Mono::now() + cx.local.delay_interval.nanos()).await;
+            *cx.local.delay_until_cycles = cx.local.delay_until_dwt.cyccnt.read();
 
-                *cx.local.delay_until_overhead = Some(
-                    (stopwatch.lap_time(1).unwrap().as_nanos() - *cx.local.delay_interval as u64).nanos()
-                );
+            *cx.local.delay_until_overhead = 
+                (*cx.local.delay_until_cycles as f32 /  *cx.local.delay_until_hclk_mhz) * 1000.0 // tot delay_until time in ns
+                - (*cx.local.delay_interval as f32);                                             // - delay interval in ns = overhead 
 
-                defmt::info!("Delay_until overhead: {} ns", cx.local.delay_until_overhead.unwrap().to_nanos() as u32);
+            defmt::info!("Delay_until overhead: {} ns", *cx.local.delay_until_overhead as u32);
+            defmt::info!("--------------------------------------------");
 
-                defmt::info!("--------------------------------------------");
+            // Update the wc_delay_until_overhead
+            *cx.local.wc_delay_until_overhead = (*cx.local.wc_delay_until_overhead).max(*cx.local.delay_until_overhead);
 
-                // Update the wc_delay_until_overhead
-                *cx.local.wc_delay_until_overhead = Some(cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).max(cx.local.delay_until_overhead.unwrap()));
-
-                *cx.local.delay_until_activation_count += 1;
-                if *cx.local.delay_until_activation_count == WCET_THRESHOLD {
-                    defmt::info!("WC Delay_until overhead: {} ns", cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).to_nanos() as u32);
-                    defmt::panic!("End of delay until profiling.");
-                }
-            } else {
-                defmt::panic!("Stopwatch not initialized.");
-            }
+            *cx.local.delay_until_activation_count += 1;
+            if *cx.local.delay_until_activation_count == WCET_THRESHOLD {
+                defmt::info!("WC Delay_until overhead: {} ns", *cx.local.wc_delay_until_overhead as u32);
+                defmt::panic!("End of delay until profiling.");
+            }            
         }
     }
 
@@ -391,7 +333,7 @@ mod app {
         loop {
             critical_section::with( |_cs| {
                 cx.local.signal_writer.write(());
-                unsafe{ cx.local.signal_writer_dwt.unwrap().cyccnt.write(0) };
+                unsafe{ cx.local.signal_writer_dwt.cyccnt.write(0) };
             });
 
             Mono::delay((1 as u32).secs()).await;
@@ -402,7 +344,7 @@ mod app {
     async fn signal_reader_task(cx: signal_reader_task::Context) -> ! {
         loop {
             cx.local.signal_reader.wait().await;
-            *cx.local.signal_reader_cycles = cx.local.signal_reader_dwt.unwrap().cyccnt.read();
+            *cx.local.signal_reader_cycles = cx.local.signal_reader_dwt.cyccnt.read();
 
             *cx.local.signal_reader_time = (*cx.local.signal_reader_cycles as f32 /  *cx.local.signal_reader_hclk_mhz) * 1000.0;
             defmt::info!("Signal RTIC sync time: {} ns (number of cycles: {})", *cx.local.signal_reader_time as u32, *cx.local.signal_reader_cycles);
@@ -424,7 +366,7 @@ mod app {
         loop {
             critical_section::with( |_cs| {
                 cx.local.task_semaphore_signaler.signal();
-                // unsafe{ cx.local.task_semaphore_signaler_dwt.unwrap().cyccnt.write(0) };
+                unsafe{ cx.local.task_semaphore_signaler_dwt.cyccnt.write(0) };
             });
 
             Mono::delay((1 as u32).secs()).await;
@@ -435,7 +377,7 @@ mod app {
     async fn task_semaphore_waiter_task(cx: task_semaphore_waiter_task::Context) -> ! {
         loop {
             cx.local.task_semaphore_waiter.wait().await;
-            *cx.local.task_semaphore_waiter_cycles = cx.local.task_semaphore_waiter_dwt.unwrap().cyccnt.read();
+            *cx.local.task_semaphore_waiter_cycles = cx.local.task_semaphore_waiter_dwt.cyccnt.read();
 
             *cx.local.task_semaphore_waiter_time = (*cx.local.task_semaphore_waiter_cycles as f32 /  *cx.local.task_semaphore_waiter_hclk_mhz) * 1000.0;
             defmt::info!("Task Semaphore wait time: {} ns (number of cycles: {})", *cx.local.task_semaphore_waiter_time as u32, *cx.local.task_semaphore_waiter_cycles);
@@ -457,7 +399,7 @@ mod app {
         loop {
             critical_section::with( |_cs| {
                 cx.local.event_queue_signaler.signal(());
-                unsafe{ cx.local.event_queue_signaler_dwt.unwrap().cyccnt.write(0) };
+                unsafe{ cx.local.event_queue_signaler_dwt.cyccnt.write(0) };
             });
 
             Mono::delay((1 as u32).secs()).await;
@@ -468,7 +410,7 @@ mod app {
     async fn event_queue_waiter_task(cx: event_queue_waiter_task::Context) -> ! {
         loop {
             cx.local.event_queue_waiter.wait().await;
-            *cx.local.event_queue_waiter_cycles = cx.local.event_queue_waiter_dwt.unwrap().cyccnt.read();
+            *cx.local.event_queue_waiter_cycles = cx.local.event_queue_waiter_dwt.cyccnt.read();
 
             *cx.local.event_queue_waiter_time = (*cx.local.event_queue_waiter_cycles as f32 /  *cx.local.event_queue_waiter_hclk_mhz) * 1000.0;
             defmt::info!("Event Queue wait time: {} ns (number of cycles: {})", *cx.local.event_queue_waiter_time as u32, *cx.local.event_queue_waiter_cycles);
