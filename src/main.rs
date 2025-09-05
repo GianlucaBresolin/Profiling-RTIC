@@ -1,11 +1,13 @@
 #![no_std]
 #![no_main]
 
-mod time;
+mod event_queue;
 mod task_semaphore;
+mod time;
 
 use cortex_m::interrupt;
 use cortex_m_semihosting::debug::{self, EXIT_FAILURE};
+
 #[cfg(feature = "rtt")]
 use defmt_rtt as _;
 #[cfg(feature = "semihosting")]
@@ -33,6 +35,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 )]
 mod app {
     use crate::{
+        event_queue::{EventQueueSignaler, EventQueueWaiter, EventQueue},
         task_semaphore::{TaskSemaphoreSignaler, TaskSemaphoreWaiter, TaskSemaphore},
         time::{Mono, Instant},
         WCET_THRESHOLD,
@@ -42,23 +45,27 @@ mod app {
         feature = "isr-switch",
         feature = "signal-rtic-sync",
         feature = "task-semaphore",
+        feature = "event-queue",
     ))]
     use core::mem::MaybeUninit;
+    #[cfg(feature = "delay-until")]
+    use stm32f4xx_hal::dwt::DwtExt;
+    use cortex_m::peripheral::DWT;
+    use stm32f4xx_hal::{
+        dwt::{
+            Dwt, 
+            StopWatch,
+        }, 
+        interrupt, 
+        pac::NVIC, 
+        rcc::RccExt,
+    };
     use rtic_monotonics::{
         fugit::{
             RateExtU32 as _,
             ExtU64 as _,
         }, 
         systick::prelude::*};
-    use cortex_m::peripheral::DWT;
-    use stm32f4xx_hal::{
-        dwt::{
-            Dwt, 
-            StopWatch,
-        }, interrupt, pac::NVIC, rcc::RccExt
-    };
-    #[cfg(feature = "delay-until")]
-    use stm32f4xx_hal::dwt::DwtExt;
     use rtic_sync::{
         signal::{
             SignalReader,
@@ -106,7 +113,7 @@ mod app {
         signal_reader_hclk_mhz: f32,
         signal_reader_activation_count: u32,
 
-        // Task Semaphore
+        // TaskSemaphore
         task_semaphore_waiter: TaskSemaphoreWaiter<'static>,
         task_semaphore_waiter_dwt: Option<&'static DWT>,
 
@@ -117,6 +124,18 @@ mod app {
         task_semaphore_waiter_activation_count: u32,
         task_semaphore_signaler: TaskSemaphoreSignaler<'static>,
         task_semaphore_signaler_dwt: Option<&'static DWT>,
+
+        // EventQueue
+        event_queue_waiter: EventQueueWaiter<'static>,
+        event_queue_waiter_dwt: Option<&'static DWT>,
+
+        event_queue_waiter_cycles: u32,
+        event_queue_waiter_hclk_mhz: f32,
+        event_queue_waiter_time: f32,
+        wc_event_queue_waiter: f32,
+        event_queue_waiter_activation_count: u32,
+        event_queue_signaler: EventQueueSignaler<'static>,
+        event_queue_signaler_dwt: Option<&'static DWT>,
     }
 
     #[init(local = [
@@ -124,6 +143,7 @@ mod app {
             feature = "isr-switch",
             feature = "signal-rtic-sync",
             feature = "task-semaphore",
+            feature = "event-queue",
         ))]
         dwt_storage: MaybeUninit<DWT> = MaybeUninit::uninit(),
         #[cfg(feature = "delay-until")]
@@ -157,7 +177,12 @@ mod app {
         // DWT setup
         #[allow(unused_assignments, unused_mut)]
         let mut dwt_ref: Option<&'static DWT> = None;
-        #[cfg(feature = "isr-switch")]
+        #[cfg(any(
+            feature = "isr-switch",
+            feature = "signal-rtic-sync",
+            feature = "task-semaphore",
+            feature = "event-queue",
+        ))]
         {
             dwt_ref = Some( 
                 unsafe { 
@@ -209,10 +234,12 @@ mod app {
                 .expect("Error spawning signal reader task");
         }
 
-        // Task Semaphore setup
+        // Fake watchdog signal for the other synchronization primitives
         let (watchdog_signal_writer, _watchdog_signal_reader) = make_signal!(Instant);
+
+        // Task Semaphore setup
         let (task_semaphore_waiter, task_semaphore_signaler) = TaskSemaphore::init(
-            watchdog_signal_writer,
+            watchdog_signal_writer.clone(),
         );
         #[cfg(feature = "task-semaphore")]
         {
@@ -221,6 +248,19 @@ mod app {
             task_semaphore_waiter_task::spawn()
                 .expect("Error spawning task semaphore waiter task");
         }
+
+        // Event Queue setup
+        let (event_queue_waiter, event_queue_signaler) = EventQueue::init(
+            watchdog_signal_writer.clone(),
+        );
+        #[cfg(feature = "event-queue")]
+        {
+            event_queue_signaler_task::spawn()
+                .expect("Error spawning event queue signaler task");
+            event_queue_waiter_task::spawn()
+                .expect("Error spawning event queue waiter task");
+        }
+
 
         (
             Shared {},
@@ -255,7 +295,7 @@ mod app {
                 signal_reader_hclk_mhz: 0.0,
                 signal_reader_activation_count: 0,
 
-                // Task Semaphore
+                // TaskSemaphore
                 task_semaphore_waiter,
                 task_semaphore_waiter_dwt: dwt_ref,
 
@@ -266,6 +306,18 @@ mod app {
                 task_semaphore_waiter_activation_count: 0,
                 task_semaphore_signaler,
                 task_semaphore_signaler_dwt: dwt_ref,
+
+                // EventQueue
+                event_queue_waiter,
+                event_queue_waiter_dwt: dwt_ref,
+
+                event_queue_waiter_cycles: 0,
+                event_queue_waiter_hclk_mhz: hclk_mhz,
+                event_queue_waiter_time: 0.0,
+                wc_event_queue_waiter: 0.0,
+                event_queue_waiter_activation_count: 0,
+                event_queue_signaler,
+                event_queue_signaler_dwt: dwt_ref,
             }
         )
     }
@@ -389,7 +441,7 @@ mod app {
             defmt::info!("Task Semaphore wait time: {} ns (number of cycles: {})", *cx.local.task_semaphore_waiter_time as u32, *cx.local.task_semaphore_waiter_cycles);
             defmt::info!("---------------------------------------------------");
 
-            Update the wc_task_semaphore_waiter
+            // Update the wc_task_semaphore_waiter
             *cx.local.wc_task_semaphore_waiter = (*cx.local.wc_task_semaphore_waiter).max(*cx.local.task_semaphore_waiter_time);
 
             *cx.local.task_semaphore_waiter_activation_count += 1;
@@ -400,4 +452,36 @@ mod app {
         }
     }
 
+    #[task(priority =2, local = [event_queue_signaler, event_queue_signaler_dwt])]
+    async fn event_queue_signaler_task(cx: event_queue_signaler_task::Context) -> ! {
+        loop {
+            critical_section::with( |_cs| {
+                cx.local.event_queue_signaler.signal(());
+                unsafe{ cx.local.event_queue_signaler_dwt.unwrap().cyccnt.write(0) };
+            });
+
+            Mono::delay((1 as u32).secs()).await;
+        }
+    }
+
+    #[task(priority = 1, local = [event_queue_waiter, event_queue_waiter_dwt, event_queue_waiter_cycles, event_queue_waiter_hclk_mhz, event_queue_waiter_time, wc_event_queue_waiter, event_queue_waiter_activation_count])]
+    async fn event_queue_waiter_task(cx: event_queue_waiter_task::Context) -> ! {
+        loop {
+            cx.local.event_queue_waiter.wait().await;
+            *cx.local.event_queue_waiter_cycles = cx.local.event_queue_waiter_dwt.unwrap().cyccnt.read();
+
+            *cx.local.event_queue_waiter_time = (*cx.local.event_queue_waiter_cycles as f32 /  *cx.local.event_queue_waiter_hclk_mhz) * 1000.0;
+            defmt::info!("Event Queue wait time: {} ns (number of cycles: {})", *cx.local.event_queue_waiter_time as u32, *cx.local.event_queue_waiter_cycles);
+            defmt::info!("---------------------------------------------------");
+
+            // Update the wc_event_queue_waiter
+            *cx.local.wc_event_queue_waiter = (*cx.local.wc_event_queue_waiter).max(*cx.local.event_queue_waiter_time);
+
+            *cx.local.event_queue_waiter_activation_count += 1;
+            if *cx.local.event_queue_waiter_activation_count == WCET_THRESHOLD {
+                defmt::info!("WC event queue wait time: {} ns", *cx.local.wc_event_queue_waiter as u32);
+                defmt::panic!("End of event queue waiter profiling.");
+            }
+        }
+    }
 }

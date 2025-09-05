@@ -24,7 +24,8 @@ Where `<OVERHEAD>` can be *just one* of the following:
 | `isr-switch`       | The context switch time of an interrupt service routine (ISR), without taking into account the execution time of the ISR itself. |
 | `delay-until`      | The overhead of the `delay_until` function provided by the `rtic_monotonics` timer, used to delay task execution until an absolute time. |
 | `signal-rtic-sync` | The overhead of waiting on a `rtic_sync` crate's signal mechanism, which provides a way for tasks to synchronize with each other. |
-| `task-semaphore`   | The overhead of waiting on a `task_semaphore`. | 
+| `task-semaphore`   | The overhead of waiting on a `TaskSemaphore`. | 
+| `event-queue`      | The overhead of waiting on an `EventQueue`. |
 
 The runner is set up to either launch a QEMU instance that prints to the host via semihosting, with `defmt-print` decoding and printing defmt logs; or to use `probe-rs` to flash and run the executable on the board.
 
