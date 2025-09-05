@@ -13,6 +13,7 @@ systick = []
 isr-switch = []
 delay-until = []
 signal-rtic-sync = []
+task-semaphore = [] 
 
 [dependencies]
 cortex-m = { version = "0.7.7", features = [

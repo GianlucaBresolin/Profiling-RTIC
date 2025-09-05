@@ -2,6 +2,7 @@
 #![no_main]
 
 mod time;
+mod task_semaphore;
 
 use cortex_m::interrupt;
 use cortex_m_semihosting::debug::{self, EXIT_FAILURE};
@@ -14,7 +15,7 @@ compile_error!("No global logger selected, enable either the rtt or semihosting 
 
 use stm32f4xx_hal as _;
 
-const WCET_THRESHOLD: u32 = 10;
+const WCET_THRESHOLD: u32 = 100;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -32,6 +33,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 )]
 mod app {
     use crate::{
+        task_semaphore::{TaskSemaphoreSignaler, TaskSemaphoreWaiter, TaskSemaphore},
         time::{Mono, Instant},
         WCET_THRESHOLD,
     };
@@ -39,6 +41,7 @@ mod app {
         feature = "delay-until",
         feature = "isr-switch",
         feature = "signal-rtic-sync",
+        feature = "task-semaphore",
     ))]
     use core::mem::MaybeUninit;
     use rtic_monotonics::{
@@ -102,12 +105,25 @@ mod app {
         wc_signal_rtic_sync: f32,
         signal_reader_hclk_mhz: f32,
         signal_reader_activation_count: u32,
+
+        // Task Semaphore
+        task_semaphore_waiter: TaskSemaphoreWaiter<'static>,
+        task_semaphore_waiter_dwt: Option<&'static DWT>,
+
+        task_semaphore_waiter_cycles: u32,
+        task_semaphore_waiter_hclk_mhz: f32,
+        task_semaphore_waiter_time: f32,
+        wc_task_semaphore_waiter: f32,
+        task_semaphore_waiter_activation_count: u32,
+        task_semaphore_signaler: TaskSemaphoreSignaler<'static>,
+        task_semaphore_signaler_dwt: Option<&'static DWT>,
     }
 
     #[init(local = [
         #[cfg(any(
             feature = "isr-switch",
             feature = "signal-rtic-sync",
+            feature = "task-semaphore",
         ))]
         dwt_storage: MaybeUninit<DWT> = MaybeUninit::uninit(),
         #[cfg(feature = "delay-until")]
@@ -193,6 +209,19 @@ mod app {
                 .expect("Error spawning signal reader task");
         }
 
+        // Task Semaphore setup
+        let (watchdog_signal_writer, _watchdog_signal_reader) = make_signal!(Instant);
+        let (task_semaphore_waiter, task_semaphore_signaler) = TaskSemaphore::init(
+            watchdog_signal_writer,
+        );
+        #[cfg(feature = "task-semaphore")]
+        {
+            task_seamaphore_signaler_task::spawn()
+                .expect("Error spawning task semaphore signaler task");
+            task_semaphore_waiter_task::spawn()
+                .expect("Error spawning task semaphore waiter task");
+        }
+
         (
             Shared {},
             Local {
@@ -225,6 +254,18 @@ mod app {
                 wc_signal_rtic_sync: 0.0,
                 signal_reader_hclk_mhz: 0.0,
                 signal_reader_activation_count: 0,
+
+                // Task Semaphore
+                task_semaphore_waiter,
+                task_semaphore_waiter_dwt: dwt_ref,
+
+                task_semaphore_waiter_cycles: 0,
+                task_semaphore_waiter_hclk_mhz: hclk_mhz,
+                task_semaphore_waiter_time: 0.0,
+                wc_task_semaphore_waiter: 0.0,
+                task_semaphore_waiter_activation_count: 0,
+                task_semaphore_signaler,
+                task_semaphore_signaler_dwt: dwt_ref,
             }
         )
     }
@@ -325,4 +366,38 @@ mod app {
             }
         }
     }
+
+    #[task(priority =2, local = [task_semaphore_signaler, task_semaphore_signaler_dwt])]
+    async fn task_seamaphore_signaler_task(cx: task_seamaphore_signaler_task::Context) -> ! {
+        loop {
+            critical_section::with( |_cs| {
+                cx.local.task_semaphore_signaler.signal();
+                // unsafe{ cx.local.task_semaphore_signaler_dwt.unwrap().cyccnt.write(0) };
+            });
+
+            Mono::delay((1 as u32).secs()).await;
+        }
+    }
+
+    #[task(priority = 1, local = [task_semaphore_waiter, task_semaphore_waiter_dwt, task_semaphore_waiter_cycles, task_semaphore_waiter_hclk_mhz, task_semaphore_waiter_time, wc_task_semaphore_waiter, task_semaphore_waiter_activation_count])]
+    async fn task_semaphore_waiter_task(cx: task_semaphore_waiter_task::Context) -> ! {
+        loop {
+            cx.local.task_semaphore_waiter.wait().await;
+            *cx.local.task_semaphore_waiter_cycles = cx.local.task_semaphore_waiter_dwt.unwrap().cyccnt.read();
+
+            *cx.local.task_semaphore_waiter_time = (*cx.local.task_semaphore_waiter_cycles as f32 /  *cx.local.task_semaphore_waiter_hclk_mhz) * 1000.0;
+            defmt::info!("Task Semaphore wait time: {} ns (number of cycles: {})", *cx.local.task_semaphore_waiter_time as u32, *cx.local.task_semaphore_waiter_cycles);
+            defmt::info!("---------------------------------------------------");
+
+            Update the wc_task_semaphore_waiter
+            *cx.local.wc_task_semaphore_waiter = (*cx.local.wc_task_semaphore_waiter).max(*cx.local.task_semaphore_waiter_time);
+
+            *cx.local.task_semaphore_waiter_activation_count += 1;
+            if *cx.local.task_semaphore_waiter_activation_count == WCET_THRESHOLD {
+                defmt::info!("WC task semaphore wait time: {} ns", *cx.local.wc_task_semaphore_waiter as u32);
+                defmt::panic!("End of task semaphore waiter profiling.");
+            }
+        }
+    }
+
 }
