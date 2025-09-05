@@ -12,6 +12,7 @@ rtt = ["defmt-rtt"]
 systick = []
 isr-switch = []
 delay-until = []
+signal-rtic-sync = []
 
 [dependencies]
 cortex-m = { version = "0.7.7", features = [

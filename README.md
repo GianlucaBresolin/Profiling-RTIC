@@ -22,7 +22,8 @@ Where `<OVERHEAD>` can be *just one* of the following:
 |--------------------|-----------|
 | `systick`          | The overhead of the `SysTick` interrupt handler (system timer overhead) defined in `rtic_monotonics`, which is responsible for activating all timed events whose expiration time has already passed. |
 | `isr-switch`       | The context switch time of an interrupt service routine (ISR), without taking into account the execution time of the ISR itself. |
-| `delay-until`      | The overhead of the `delay_until` function provided by the `rtic_monotonics` timer, which is used to   delay the execution of a task until an absolute time. |
+| `delay-until`      | The overhead of the `delay_until` function provided by the `rtic_monotonics` timer, used to delay task execution until an absolute time. |
+| `signal-rtic-sync` | The overhead of waiting on a `rtic_sync` crate's signal mechanism, which provides a way for tasks to synchronize with each other. |
 
 The runner is set up to either launch a QEMU instance that prints to the host via semihosting, with `defmt-print` decoding and printing defmt logs; or to use `probe-rs` to flash and run the executable on the board.
 

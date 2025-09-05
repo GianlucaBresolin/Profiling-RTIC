@@ -28,7 +28,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[rtic::app(
     device = stm32f4xx_hal::pac,
-    dispatchers = [EXTI1],
+    dispatchers = [EXTI1, EXTI2],
 )]
 mod app {
     use crate::{
@@ -38,6 +38,7 @@ mod app {
     #[cfg(any(
         feature = "delay-until",
         feature = "isr-switch",
+        feature = "signal-rtic-sync",
     ))]
     use core::mem::MaybeUninit;
     use rtic_monotonics::{
@@ -55,6 +56,13 @@ mod app {
     };
     #[cfg(feature = "delay-until")]
     use stm32f4xx_hal::dwt::DwtExt;
+    use rtic_sync::{
+        signal::{
+            SignalReader,
+            SignalWriter,
+        },
+        make_signal,
+    };
 
     type ProfilingDuration = fugit::NanosDurationU64;
 
@@ -82,10 +90,25 @@ mod app {
         delay_until_stopwatch: Option<StopWatch<'static>>,
         delay_until_overhead: Option<ProfilingDuration>, 
         wc_delay_until_overhead: Option<ProfilingDuration>,
+
+        // Signal rtic_sync
+        signal_writer: SignalWriter<'static, ()>,
+        signal_writer_dwt: Option<&'static DWT>,
+
+        signal_reader: SignalReader<'static, ()>,
+        signal_reader_dwt: Option<&'static DWT>,
+        signal_reader_cycles: u32,
+        signal_reader_time: f32,
+        wc_signal_rtic_sync: f32,
+        signal_reader_hclk_mhz: f32,
+        signal_reader_activation_count: u32,
     }
 
     #[init(local = [
-        #[cfg(feature = "isr-switch")]
+        #[cfg(any(
+            feature = "isr-switch",
+            feature = "signal-rtic-sync",
+        ))]
         dwt_storage: MaybeUninit<DWT> = MaybeUninit::uninit(),
         #[cfg(feature = "delay-until")]
         dwt_hal_storage: MaybeUninit<Dwt> = MaybeUninit::uninit(),
@@ -130,6 +153,7 @@ mod app {
             );
         }
 
+        // Dwt HAL setup (provides stopwatch)
         #[allow(unused_variables)]
         let hal_dwt: Option<&'static Dwt>;
         #[cfg(feature = "delay-until")]
@@ -142,23 +166,32 @@ mod app {
                 }
             );  
         }
-        // Delay_until stopwatch setup
-        #[allow(unused_assignments, unused_mut)]
-        let mut delay_until_stopwatch: Option<StopWatch<'static>> = None;
-        #[cfg(feature = "delay-until")]
-        {
-            delay_until_stopwatch = Some(hal_dwt.unwrap().stopwatch(cx.local.delay_until_times));
-        }
 
         // ISR-Switch profiling setup
         #[cfg(feature = "isr-switch")] 
         rise_interrupt::spawn()
             .expect("Error spawning interrupt generator");
-        
-        // Delay_until profiling setup
+
+        // Delay_until stopwatch and profiling setup
+        #[allow(unused_assignments, unused_mut)]
+        let mut delay_until_stopwatch: Option<StopWatch<'static>> = None;
         #[cfg(feature = "delay-until")]
-        delay_until_profiling::spawn()
-            .expect("Error spawning delay_until task");
+        {
+            delay_until_stopwatch = Some(hal_dwt.unwrap().stopwatch(cx.local.delay_until_times));
+
+            delay_until_profiling::spawn()
+                .expect("Error spawning delay_until task");
+        }
+
+        // Signal rtic_sync setup
+        let (signal_writer, signal_reader) = make_signal!(());
+        #[cfg(feature = "signal-rtic-sync")]
+        {
+            signal_writer_task::spawn()
+                .expect("Error spawning signal writer task");
+            signal_reader_task::spawn()
+                .expect("Error spawning signal reader task");
+        }
 
         (
             Shared {},
@@ -180,12 +213,24 @@ mod app {
                 delay_until_stopwatch, 
                 delay_until_overhead: None,
                 wc_delay_until_overhead: None,
+
+                // Signal rtic_sync
+                signal_writer,
+                signal_writer_dwt: dwt_ref,
+
+                signal_reader,
+                signal_reader_dwt: dwt_ref,
+                signal_reader_cycles: 0,
+                signal_reader_time: 0.0,
+                wc_signal_rtic_sync: 0.0,
+                signal_reader_hclk_mhz: 0.0,
+                signal_reader_activation_count: 0,
             }
         )
     }
 
     #[task(priority = 1, local=[rise_interrupt_dwt, next_time])]
-    async fn rise_interrupt(cx: rise_interrupt::Context) {
+    async fn rise_interrupt(cx: rise_interrupt::Context) -> ! {
         defmt::info!("Start of isr-switch profiling.");
         unsafe { NVIC::unmask(interrupt::EXTI0) };
         loop {
@@ -219,30 +264,65 @@ mod app {
     } 
 
     #[task(priority = 1, local =[delay_until_activation_count, delay_until_stopwatch, delay_interval, delay_until_overhead, wc_delay_until_overhead])]
-    async fn delay_until_profiling(cx: delay_until_profiling::Context) {
-        if let Some(stopwatch  ) = cx.local.delay_until_stopwatch.as_mut() {
-            stopwatch.reset();
-            Mono::delay_until(Mono::now() + cx.local.delay_interval.nanos()).await;
-            stopwatch.lap();
+    async fn delay_until_profiling(cx: delay_until_profiling::Context) -> ! {
+        loop {
+            if let Some(stopwatch) = cx.local.delay_until_stopwatch.as_mut() {
+                stopwatch.reset();
+                Mono::delay_until(Mono::now() + cx.local.delay_interval.nanos()).await;
+                stopwatch.lap();
 
-            *cx.local.delay_until_overhead = Some(
-                (stopwatch.lap_time(1).unwrap().as_nanos() - *cx.local.delay_interval as u64).nanos()
-            );
+                *cx.local.delay_until_overhead = Some(
+                    (stopwatch.lap_time(1).unwrap().as_nanos() - *cx.local.delay_interval as u64).nanos()
+                );
 
-            defmt::info!("Delay_until overhead: {} ns", cx.local.delay_until_overhead.unwrap().to_nanos() as u32);
+                defmt::info!("Delay_until overhead: {} ns", cx.local.delay_until_overhead.unwrap().to_nanos() as u32);
 
-            defmt::info!("--------------------------------------------");
+                defmt::info!("--------------------------------------------");
 
-            // Update the wc_delay_until_overhead
-            *cx.local.wc_delay_until_overhead = Some(cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).max(cx.local.delay_until_overhead.unwrap()));
+                // Update the wc_delay_until_overhead
+                *cx.local.wc_delay_until_overhead = Some(cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).max(cx.local.delay_until_overhead.unwrap()));
 
-            *cx.local.delay_until_activation_count += 1;
-            if *cx.local.delay_until_activation_count == WCET_THRESHOLD {
-                defmt::info!("WC Delay_until overhead: {} ns", cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).to_nanos() as u32);
-                defmt::panic!("End of delay until profiling.");
+                *cx.local.delay_until_activation_count += 1;
+                if *cx.local.delay_until_activation_count == WCET_THRESHOLD {
+                    defmt::info!("WC Delay_until overhead: {} ns", cx.local.wc_delay_until_overhead.unwrap_or((0 as u64).nanos()).to_nanos() as u32);
+                    defmt::panic!("End of delay until profiling.");
+                }
+            } else {
+                defmt::panic!("Stopwatch not initialized.");
             }
-        } else {
-            defmt::panic!("Stopwatch not initialized.");
+        }
+    }
+
+    #[task(priority = 2, local = [signal_writer, signal_writer_dwt])]
+    async fn signal_writer_task(cx: signal_writer_task::Context) -> ! {
+        loop {
+            critical_section::with( |_cs| {
+                cx.local.signal_writer.write(());
+                unsafe{ cx.local.signal_writer_dwt.unwrap().cyccnt.write(0) };
+            });
+
+            Mono::delay((1 as u32).secs()).await;
+        }
+    }
+
+    #[task(priority = 1, local = [signal_reader, signal_reader_dwt, signal_reader_cycles, signal_reader_hclk_mhz, signal_reader_time, wc_signal_rtic_sync, signal_reader_activation_count])]
+    async fn signal_reader_task(cx: signal_reader_task::Context) -> ! {
+        loop {
+            cx.local.signal_reader.wait().await;
+            *cx.local.signal_reader_cycles = cx.local.signal_reader_dwt.unwrap().cyccnt.read();
+
+            *cx.local.signal_reader_time = (*cx.local.signal_reader_cycles as f32 /  *cx.local.signal_reader_hclk_mhz) * 1000.0;
+            defmt::info!("Signal RTIC sync time: {} ns (number of cycles: {})", *cx.local.signal_reader_time as u32, *cx.local.signal_reader_cycles);
+            defmt::info!("---------------------------------------------------");
+
+            // Update the wc_signal_rtic_sync
+            *cx.local.wc_signal_rtic_sync = (*cx.local.wc_signal_rtic_sync).max(*cx.local.signal_reader_time);
+
+            *cx.local.signal_reader_activation_count += 1;
+            if *cx.local.signal_reader_activation_count == WCET_THRESHOLD {
+                defmt::info!("WC signal RTIC sync time: {} ns", *cx.local.wc_signal_rtic_sync as u32);
+                defmt::panic!("End of signal rttc_sync profiling.");
+            }
         }
     }
 }
