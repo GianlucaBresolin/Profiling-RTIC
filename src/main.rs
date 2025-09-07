@@ -37,7 +37,12 @@ mod app {
     use crate::{
         event_queue::{EventQueueSignaler, EventQueueWaiter, EventQueue},
         task_semaphore::{TaskSemaphoreSignaler, TaskSemaphoreWaiter, TaskSemaphore},
-        time::{Mono, Instant},
+        time::{
+            Mono, 
+            Instant, 
+            set_hclk_mhz,
+            set_dwt_ref,
+        },
         WCET_THRESHOLD,
     };
     use core::mem::MaybeUninit;
@@ -132,7 +137,6 @@ mod app {
 
         // Extract device from context
         let peripherals = cx.device;
-        #[allow(unused_mut)]
         let mut core = cx.core;
 
         // Clocks setup
@@ -144,21 +148,24 @@ mod app {
             .pclk1(42.MHz())
             .freeze();
 
-        // Setup monotonic timer
-        Mono::start(core.SYST, clocks.sysclk().to_Hz());
-        
         // HCLK setup
         let hclk_mhz = clocks.hclk().to_MHz() as f32;
+        #[cfg(feature = "systick")]
+        set_hclk_mhz(hclk_mhz);
 
         // DWT setup
-        #[allow(unused_assignments, unused_mut)]
-        let mut dwt_ref: &'static DWT = 
+        let dwt_ref: &'static DWT = 
             unsafe { 
                 core.DCB.enable_trace();
                 core.DWT.enable_cycle_counter();
                 cx.local.dwt_storage.write(core.DWT);
                 cx.local.dwt_storage.assume_init_ref()
             };
+        #[cfg(feature = "systick")]
+        set_dwt_ref(dwt_ref);
+
+        // Setup monotonic timer
+        Mono::start(core.SYST, clocks.sysclk().to_Hz());
 
         // ISR-Switch profiling setup
         #[cfg(feature = "isr-switch")] 

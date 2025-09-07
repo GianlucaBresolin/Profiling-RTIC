@@ -143,6 +143,15 @@ impl TimerQueueBackend for SystickBackend {
     }
 }
 
+/// Previous measured time in ns (to compute overhead)
+pub static mut PREVIOUS_TIME: f32 = 0.0;
+/// Threshold for WCET measurements
+pub static WCET_THRESHOLD: u32 = 500; 
+/// Measurement counter
+pub static mut MEASUREMENT_COUNTER: u32 = 0;
+/// Worst-case overhead in ns
+pub static mut WC_OVERHEAD: f32 = 0.0;
+
 /// Create a Systick based monotonic and register the Systick interrupt for it.
 ///
 /// This macro expands to produce a new type called `$name`, which has a `fn
@@ -166,7 +175,7 @@ macro_rules! systick_monotonic {
     ($name:ident) => {
         $crate::systick_monotonic!($name, 1_000);
     };
-    ($name:ident, $tick_rate_hz:expr) => {
+    ($name:ident, $tick_rate_hz:expr, $core_rate_mhz:expr, $dwt_ref:expr) => {
         /// A `Monotonic` based on SysTick.
         pub struct $name;
 
@@ -181,21 +190,42 @@ macro_rules! systick_monotonic {
             ///
             /// This method must be called only once.
             pub fn start(systick: $crate::systick::SYST, sysclk: u32) {
-                let mut peripherals = cortex_m::Peripherals::take().unwrap();
-                peripherals.DCB.enable_trace();
-                peripherals.DWT.enable_cycle_counter();
+                use profiled_rtic_monotonics::systick::{
+                    PREVIOUS_TIME,
+                    MEASUREMENT_COUNTER,
+                    WC_OVERHEAD,
+                    WCET_THRESHOLD,
+                };
 
                 #[no_mangle]
                 #[allow(non_snake_case)]
                 unsafe extern "C" fn SysTick() {
                     use $crate::TimerQueueBackend;
                     $crate::systick::SystickBackend::timer_queue().on_monotonic_interrupt();
-                    let cycles = unsafe { (*cortex_m::peripheral::DWT::PTR).cyccnt.read() };
-                    defmt::info!("Cycles since last tick: {}", cycles);
+                    let cycles = unsafe { (*$dwt_ref).cyccnt.read() };
+                    let overhead = 
+                        (cycles as f32 / $core_rate_mhz) * 1_000.0 // all-time (ns)
+                        - PREVIOUS_TIME                            // - previous-time (ns) 
+                        - 1_000_000.0;                             // - 1ms timer period (ns) = overhead (ns)
+                    // update previous_time
+                    PREVIOUS_TIME = (cycles as f32 / $core_rate_mhz) * 1_000.0;
+                    // update worst-case overhead
+                    if overhead > WC_OVERHEAD {
+                        WC_OVERHEAD = overhead;
+                    }
+                    defmt::info!("SysTick overhead: {} ns", overhead as u32);
+                    defmt::info!("----------------------------------");
+                    // update counter
+                    MEASUREMENT_COUNTER += 1;
+                    // print worst-case overhead every WCET_THRESHOLD measurements
+                    if MEASUREMENT_COUNTER >= WCET_THRESHOLD {
+                        defmt::info!("Worst-case SysTick overhead: {} ns", WC_OVERHEAD as u32);
+                        defmt::panic!("End of systick measurements, stopping.");
+                    }
                 }
 
                 $crate::systick::SystickBackend::_start(systick, sysclk, $tick_rate_hz);
-                unsafe { (*cortex_m::peripheral::DWT::PTR).cyccnt.write(0) };
+                unsafe { (*$dwt_ref).cyccnt.write(0) };
             }
         }
 
