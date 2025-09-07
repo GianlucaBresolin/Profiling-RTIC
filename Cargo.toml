@@ -6,8 +6,8 @@ edition = "2024"
 [features]
 deafult = []
 
-semihosting = ["defmt-semihosting"]
-rtt = ["defmt-rtt"]
+semihosting = ["defmt-semihosting", "profiled-rtic-monotonics/defmt", "profiled-rtic-monotonics/semihosting"]
+rtt = ["defmt-rtt", "profiled-rtic-monotonics/defmt", "profiled-rtic-monotonics/rtt"]
 
 systick = []
 isr-switch = []
@@ -34,7 +34,7 @@ rtic-monotonics = { version = "2.1.0", features = [
   "stm32_tim2",
   "defmt",
 ] }
-profiled-rtic-monotonics = { path = "./profiled-rtic-monotonics", features = ["cortex-m-systick", "semihosting"] }
+profiled-rtic-monotonics = { path = "./profiled-rtic-monotonics", features = ["cortex-m-systick"] }
 rtic-sync = { version = "1.4.0", features = ["defmt-03"] }
 stm32f4xx-hal = { git = "https://github.com/tommasoprandin/stm32f4xx-hal", branch = "support/qemu-olimexh405", features = [
   "qemu-olimexh405",

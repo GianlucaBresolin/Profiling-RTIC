@@ -246,7 +246,7 @@ mod app {
                 signal_reader_cycles: 0,
                 signal_reader_time: 0.0,
                 wc_signal_rtic_sync: 0.0,
-                signal_reader_hclk_mhz: 0.0,
+                signal_reader_hclk_mhz: hclk_mhz,
                 signal_reader_activation_count: 0,
 
                 // TaskSemaphore

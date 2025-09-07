@@ -572,6 +572,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-semihosting",
  "defmt 1.0.1",
+ "defmt-rtt",
  "defmt-semihosting",
  "fugit",
  "portable-atomic",
