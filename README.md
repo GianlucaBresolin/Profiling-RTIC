@@ -27,6 +27,7 @@ Where `<OVERHEAD>` can be *just one* of the following:
 | `task-semaphore`   | The overhead of waiting on a `TaskSemaphore`. | 
 | `event-queue`      | The overhead of waiting on an `EventQueue`. |
 | `spawn-overhead`   | The (best) overhead of spawning a task. |
+| `context-switch`   | The context switch time between two tasks (this value also includes the spawn overhead of the preempting task). |
 
 The runner is set up to either launch a QEMU instance that prints to the host via semihosting, with `defmt-print` decoding and printing defmt logs; or to use `probe-rs` to flash and run the executable on the board.
 

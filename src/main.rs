@@ -135,6 +135,14 @@ mod app {
         bc_spawn_overhead: f32, 
         spawn_overhead_hclk_mhz: f32, 
         spawn_overhead_activation_count: u32,
+
+        // Context switch
+        context_switch_task_dwt: &'static DWT, 
+        context_switch_task_cycles: u32, 
+        context_switch_task_hclk_mhz: f32, 
+        context_switch_ns: f32, 
+        wc_context_switch: f32, 
+        context_switch_task_activation_count: u32,
     }
 
     #[init(local = [
@@ -227,6 +235,11 @@ mod app {
         spawn_overhead_task::spawn()
             .expect("Error spawning spawn overhead task");
 
+        // Context switch setup
+        #[cfg(feature = "context-switch")]
+        context_switch_task::spawn()
+            .expect("Error spawning context switch task");
+
         (
             Shared {},
             Local {
@@ -293,6 +306,14 @@ mod app {
                 bc_spawn_overhead: f32::MAX, 
                 spawn_overhead_hclk_mhz: hclk_mhz, 
                 spawn_overhead_activation_count: 0,
+
+                // Context switch
+                context_switch_task_dwt: dwt_ref, 
+                context_switch_task_cycles: 0, 
+                context_switch_task_hclk_mhz: hclk_mhz, 
+                context_switch_ns: 0.0, 
+                wc_context_switch: 0.0, 
+                context_switch_task_activation_count: 0,
             }
         )
     }
@@ -478,8 +499,36 @@ mod app {
         }
     }
 
-    #[task (priority = 1)]
+    #[task(priority = 1)]
     async fn spawned_task(_cx: spawned_task::Context) {
         let _ = ();
     }
+
+    #[task(priority = 1, local = [context_switch_task_dwt, context_switch_task_cycles, context_switch_task_hclk_mhz, context_switch_ns, wc_context_switch, context_switch_task_activation_count])]
+    async fn context_switch_task(cx: context_switch_task::Context) -> ! {
+        loop {
+            unsafe { cx.local.context_switch_task_dwt.cyccnt.write(0) };
+            preempting_task::spawn().unwrap();
+            *cx.local.context_switch_task_cycles = cx.local.context_switch_task_dwt.cyccnt.read();
+
+            *cx.local.context_switch_ns = (*cx.local.context_switch_task_cycles as f32 / *cx.local.context_switch_task_hclk_mhz) * 1000.0;
+            defmt::info!("Context switch time: {} ns (number of cycles: {})", *cx.local.context_switch_ns as u32, *cx.local.context_switch_task_cycles);
+            defmt::info!("--------------------------------------------");
+
+            // Update the wc_context_switch
+            *cx.local.wc_context_switch = (*cx.local.wc_context_switch).max(*cx.local.context_switch_ns);
+
+            *cx.local.context_switch_task_activation_count += 1;
+            if *cx.local.context_switch_task_activation_count == WCET_THRESHOLD {
+                defmt::info!("WC context switch time: {} ns", *cx.local.wc_context_switch as u32);
+                defmt::panic!("End of context switch profiling.");
+            }
+
+            Mono::delay((1 as u32).secs()).await;
+        }
+    }
+
+    #[task(priority = 2)]
+    async fn preempting_task(_cx: preempting_task::Context) {}
+
 }

@@ -16,6 +16,7 @@ signal-rtic-sync = []
 task-semaphore = [] 
 event-queue = []
 spawn-overhead = []
+context-switch = []
 
 [dependencies]
 cortex-m = { version = "0.7.7", features = [
