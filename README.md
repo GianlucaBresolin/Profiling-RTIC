@@ -26,6 +26,7 @@ Where `<OVERHEAD>` can be *just one* of the following:
 | `signal-rtic-sync` | The overhead of waiting on a `rtic_sync` crate's signal mechanism, which provides a way for tasks to synchronize with each other. |
 | `task-semaphore`   | The overhead of waiting on a `TaskSemaphore`. | 
 | `event-queue`      | The overhead of waiting on an `EventQueue`. |
+| `spawn-overhead`   | The (best) overhead of spawning a task. |
 
 The runner is set up to either launch a QEMU instance that prints to the host via semihosting, with `defmt-print` decoding and printing defmt logs; or to use `probe-rs` to flash and run the executable on the board.
 

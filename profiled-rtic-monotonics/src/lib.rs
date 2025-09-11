@@ -70,9 +70,6 @@ pub mod esp32c6;
 #[cfg(feature = "cortex-m-systick")]
 pub mod systick;
 
-#[cfg(feature = "cortex-m-systick")]
-pub use systick::systick_monotonic; 
-
 #[cfg(feature = "rp2040")]
 pub mod rp2040;
 

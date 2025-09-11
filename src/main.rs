@@ -40,11 +40,11 @@ mod app {
         time::{
             Mono, 
             Instant, 
-            set_hclk_mhz,
-            set_dwt_ref,
         },
         WCET_THRESHOLD,
     };
+    #[cfg(feature = "systick")]
+    use crate::time::{set_dwt_ref, set_hclk_mhz};
     use core::mem::MaybeUninit;
     use cortex_m::peripheral::DWT;
     use stm32f4xx_hal::{
@@ -127,6 +127,14 @@ mod app {
         event_queue_waiter_activation_count: u32,
         event_queue_signaler: EventQueueSignaler<'static>,
         event_queue_signaler_dwt: &'static DWT,
+
+        // Spawn overhead
+        spawn_overhead_dwt: &'static DWT,
+        spawn_overhead_cycles: u32,
+        spawn_overhead_ns: f32, 
+        bc_spawn_overhead: f32, 
+        spawn_overhead_hclk_mhz: f32, 
+        spawn_overhead_activation_count: u32,
     }
 
     #[init(local = [
@@ -214,6 +222,11 @@ mod app {
                 .expect("Error spawning event queue waiter task");
         }
 
+        // Spawn overhead setup
+        #[cfg(feature = "spawn-overhead")]
+        spawn_overhead_task::spawn()
+            .expect("Error spawning spawn overhead task");
+
         (
             Shared {},
             Local {
@@ -272,6 +285,14 @@ mod app {
                 event_queue_waiter_activation_count: 0,
                 event_queue_signaler,
                 event_queue_signaler_dwt: dwt_ref,
+
+                // Spawn overhead
+                spawn_overhead_dwt: dwt_ref, 
+                spawn_overhead_cycles: 0, 
+                spawn_overhead_ns: 0.0, 
+                bc_spawn_overhead: f32::MAX, 
+                spawn_overhead_hclk_mhz: hclk_mhz, 
+                spawn_overhead_activation_count: 0,
             }
         )
     }
@@ -432,5 +453,33 @@ mod app {
                 defmt::panic!("End of event queue waiter profiling.");
             }
         }
+    }
+
+    #[task(priority = 2, local = [spawn_overhead_dwt, spawn_overhead_cycles, spawn_overhead_ns, bc_spawn_overhead, spawn_overhead_hclk_mhz, spawn_overhead_activation_count])]
+    async fn spawn_overhead_task(cx: spawn_overhead_task::Context) -> ! {
+        loop {
+            unsafe { cx.local.spawn_overhead_dwt.cyccnt.write(0) };
+            spawned_task::spawn().unwrap();
+            *cx.local.spawn_overhead_cycles = cx.local.spawn_overhead_dwt.cyccnt.read();
+
+            *cx.local.spawn_overhead_ns = (*cx.local.spawn_overhead_cycles as f32 / *cx.local.spawn_overhead_hclk_mhz) * 1000.0;
+            defmt::info!("Spawn overhead time: {} ns (number of cycles: {})", *cx.local.spawn_overhead_ns as u32, *cx.local.spawn_overhead_cycles);
+            defmt::info!("--------------------------------------------");
+            
+            // Update the wc_spawn_overhead
+            *cx.local.bc_spawn_overhead = (*cx.local.bc_spawn_overhead).min(*cx.local.spawn_overhead_ns);
+
+            *cx.local.spawn_overhead_activation_count += 1;
+            if *cx.local.spawn_overhead_activation_count == WCET_THRESHOLD {
+                defmt::info!("BC spawn overhead time: {} ns", *cx.local.bc_spawn_overhead as u32);
+                defmt::panic!("End of spawn overhead profiling.");
+            }
+            Mono::delay((1 as u32).secs()).await;
+        }
+    }
+
+    #[task (priority = 1)]
+    async fn spawned_task(_cx: spawned_task::Context) {
+        let _ = ();
     }
 }
